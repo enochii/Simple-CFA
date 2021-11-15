@@ -61,8 +61,12 @@ cl::opt<bool> DumpModule("m", cl::desc("Dump module"),
                          cl::init(false), cl::Hidden);
 cl::opt<bool> DebugInfo("d", cl::desc("Dump debug info"),
                          cl::init(false), cl::Hidden);
+cl::opt<bool> DumpTrace("t", cl::desc("Dump trace"),
+                         cl::init(false), cl::Hidden);
+
+static std::string getValueName (const Value *v);
 /// Points to relation
-typedef set<Value *> PointsToSet;
+typedef set<const Value *> PointsToSet;
 static void mergePtsSet(PointsToSet *dest, const PointsToSet& src) {
   dest->insert(src.begin(), src.end());
 }
@@ -88,9 +92,9 @@ const PointsToInfo PointsToInfo::TOP;
 
 inline raw_ostream &operator<<(raw_ostream &out, const PointsToInfo &info) {
   for (auto &item:info.pointsTo) {
-    out << item.first->getName() << "-> { ";
+    out << getValueName(item.first) << "-> { ";
     for(auto v:item.second) out << v->getName() << ", ";
-    out << "}\n"; 
+    out << "} "; 
   }
   return out;
 }
@@ -100,16 +104,18 @@ struct FuncPtrPass;
 /// Intra-Procedural Visitor
 class IntraPointerVisitor : public DataflowVisitor<PointsToInfo> {
   FuncPtrPass *cfaPass = NULL;
+  set<const Value*> allocSites;
+  map<const Instruction*, const Value*> inst2site;
 
   void propagateInfo2Parameters(const CallInst *callInst, const Function *F, PointsToInfo* pstInfo);
 
   void handleCall(ImmutableCallSite& cs, PointsToInfo* pstInfo);
 public:
   IntraPointerVisitor(FuncPtrPass* pass): cfaPass(pass){}
-
   void merge(PointsToInfo *dest, const PointsToInfo &src) override;
-
   void compDFVal(Instruction *inst, PointsToInfo *pstInfo) override;
+  PointsToSet getPstSet(const Value* value, PointsToInfo* pstInfo);
+  const Value* getOrCreateAllocSite(const Instruction* inst);
 };
 
 ///!TODO TO BE COMPLETED BY YOU FOR ASSIGNMENT 3
@@ -125,19 +131,28 @@ struct FuncPtrPass : public ModulePass {
 
   /// a function will have a local mapping
   map<const Function*, DataflowResult<PointsToInfo>::Type > gloablMap;
-  set<Function*> worklist;
+  set<const Function*> worklist;
   IntraPointerVisitor visitor;
   /// context insensitive, we merge all the return information
   /// callsite will get points-to set fro, here
   map<Function*, PointsToSet> retPSet;
   map<const Instruction*, set<const Function*>> callees;
+  map<const Function*, set<const Function*> > callers;
 
+  LLVMContext *Ctx;
   const PointsToSet& getRetInfo(Function *F) {
     return retPSet[F];
   }
-  void addRetInfo(Function *F, const PointsToSet& newInfo) {
-    if(newInfo.empty()) return;
-    mergePtsSet(&retPSet[F], newInfo);
+  /// return true if retInfo changes
+  bool addRetInfo(Function *F, const PointsToSet& newInfo) {
+    if(newInfo.empty()) return false;
+    auto retInfo = retPSet[F];
+    mergePtsSet(&retInfo, newInfo);
+    if(!(retPSet[F] == retInfo)) {
+      retPSet[F] = retInfo;
+      return true;
+    }
+    return false;
   }
   /// if we add more information, will the IN of entry node of function F change?
   /// if changed, the info will be added into IN[F.entry]
@@ -154,9 +169,10 @@ struct FuncPtrPass : public ModulePass {
   bool willChange(Function *F, ReturnInst* returnSite, const PointsToInfo &info);
 
   /// add a function to global worklist
-  void addFuncToWorklist(Function *F) { worklist.insert(F); }
+  void addFuncToWorklist(const Function *F) { worklist.insert(F); }
 
   void run(Module &M) {
+    Ctx = &M.getContext();
     PointsToInfo initial; // empty mapping
     for(auto it=begin(M); it!=end(M); it++) {
       Function* F = &*it;
@@ -165,8 +181,11 @@ struct FuncPtrPass : public ModulePass {
     /// 
     
     while(!worklist.empty()) {
-      Function * F = *worklist.begin();
+      Function * F = const_cast<Function*>(*worklist.begin());
       worklist.erase(worklist.begin());
+      if(DebugInfo) {
+        llvm::errs() << "pop function: " << F->getName() << "\n";
+      }
       auto &mapping = gloablMap[F];
       compForwardDataflow(F, &visitor, &mapping, initial);
     }
@@ -179,7 +198,27 @@ struct FuncPtrPass : public ModulePass {
       M.dump();
       errs() << "------------------------------\n";
     }
+    run(M);
+    for(auto& kv:gloablMap) {
+      // errs() << kv.first->getName() << ":\n";
+      // printDataflowResult<PointsToInfo>(errs(), kv.second);
+    }
+    dumpResult();
     return false;
+  }
+
+  void dumpResult() {
+    for(auto kv:callees) {
+      auto D = kv.first->getDebugLoc();
+      assert(D);
+      llvm::errs() << D.getLine() << ": ";
+      string res;
+      for(auto &f:kv.second) {
+        res += f->getName().str() + ", ";
+      }
+      assert(res.size() > 0 && "no target method!");
+      llvm::errs() << res.substr(0, res.size()-2) << "\n";
+    }
   }
 };
 
@@ -194,10 +233,18 @@ void IntraPointerVisitor::merge(PointsToInfo *dest, const PointsToInfo &src) {
 void IntraPointerVisitor::compDFVal(Instruction *inst, PointsToInfo *pstInfo) {
   if (isa<DbgInfoIntrinsic>(inst))
     return;
-  /// TODO:
+  if(DumpTrace) {
+    llvm::errs() << "before: " << *pstInfo << "\n";
+    inst->dump();
+  }
   switch (inst->getOpcode())
   {
-  // case Instruction::Alloca :
+  case Instruction::Alloca: {
+    auto site = getOrCreateAllocSite(inst);
+    pstInfo->pointsTo[inst].clear();
+    pstInfo->pointsTo[inst].insert(site);
+    break;
+  } 
   case Instruction::Call: {
     ImmutableCallSite cs(inst);
     handleCall(cs, pstInfo);
@@ -205,15 +252,24 @@ void IntraPointerVisitor::compDFVal(Instruction *inst, PointsToInfo *pstInfo) {
   }
   case Instruction::Ret: 
     if(inst->getType()->isPointerTy()) {
-      auto &src = pstInfo->pointsTo[inst->getOperand(0)];
-      cfaPass->addRetInfo(inst->getParent()->getParent(), src);
+      auto src = getPstSet(inst->getOperand(0), pstInfo);
+      auto curF = inst->getParent()->getParent();
+      bool changed = cfaPass->
+              addRetInfo(curF, src);
+      if(changed) {
+        auto& callers = cfaPass->callers[curF];
+        for(auto caller:callers) 
+          cfaPass->addFuncToWorklist(caller);
+      }
     }
     break;
   case Instruction::PHI: {
     auto phiInst = cast<PHINode>(inst);
     auto& dest = pstInfo->pointsTo[inst];
-    for(unsigned i=0; i<phiInst->getNumIncomingValues(); i++)
-      mergePtsSet(&dest, pstInfo->pointsTo[phiInst->getIncomingValue(i)]);
+    for(unsigned i=0; i<phiInst->getNumIncomingValues(); i++) {
+      auto pst = getPstSet(phiInst->getIncomingValue(i), pstInfo);
+      mergePtsSet(&dest, pst);
+    }
     break;
   }
   case Instruction::GetElementPtr:
@@ -222,8 +278,13 @@ void IntraPointerVisitor::compDFVal(Instruction *inst, PointsToInfo *pstInfo) {
     if(inst->getType()->isPointerTy()) {
       auto loadFrom = inst->getOperand(0);
       auto &src = pstInfo->pointsTo[loadFrom];
-      auto &loadTo = pstInfo->pointsTo[inst];
-      loadTo = src; // strong update
+      // auto &loadTo = pstInfo->pointsTo[inst];
+      PointsToSet res;
+      for(auto v:src) {
+        mergePtsSet(&res, getPstSet(v, pstInfo));
+      }
+      // strong update
+      pstInfo->pointsTo[inst] = res;
     }
     break;
   case Instruction::Store:
@@ -237,17 +298,21 @@ void IntraPointerVisitor::compDFVal(Instruction *inst, PointsToInfo *pstInfo) {
       /// TODO: incorrect!
         auto singleLoc = *dests.begin();
         // S(x) = S/S(x) ∪ S(y)
-        pstInfo->pointsTo[singleLoc] = pstInfo->pointsTo[value];
+        // auto pst = getPstSet(value, pstInfo);
+        pstInfo->pointsTo[singleLoc] = getPstSet(value, pstInfo);
       } else if(dests.empty()) 
         *pstInfo = PointsToInfo::TOP; // remove all information
       else {
         for(auto p:dests) 
-          mergePtsSet(&pstInfo->pointsTo[p], pstInfo->pointsTo[value]);
+          mergePtsSet(&pstInfo->pointsTo[p], getPstSet(value, pstInfo));
       }
     }
     break;
   default:
     break;
+  }
+   if(DumpTrace) {
+    llvm::errs() << "after: " << *pstInfo << "\n";
   }
 }
 
@@ -257,22 +322,89 @@ void IntraPointerVisitor::propagateInfo2Parameters(const CallInst *callInst, con
   
   auto argIt = callInst->arg_begin();
   auto parIt = F->arg_begin();
+  auto entryIn = fMap[entry].first;
   while(argIt != callInst->arg_end() && parIt != F->arg_end()) {
     Value* arg = *argIt;
     const Value* par = &*parIt;
-    auto &argSet = pstInfo->pointsTo[arg];
-    auto &entryIn = fMap[entry].first;
-    mergePtsSet(&entryIn.pointsTo[par], argSet);
+    if(arg->getType()->isPointerTy()) {
+      auto argSet = getPstSet(arg, pstInfo);
+      mergePtsSet(&entryIn.pointsTo[par], argSet);
+    }
+    ++argIt;
+    ++parIt;
+  }
+
+  if(!(entryIn == fMap[entry].first)) {
+    if(DebugInfo) {
+      llvm::errs() << "after passing args: " << fMap[entry].first << "\n";
+      llvm::errs() << "before passing args: " << entryIn << "\n";
+    }
+    fMap[entry].first = entryIn;
+    cfaPass->addFuncToWorklist(F);
   }
 }
 
 void IntraPointerVisitor::handleCall(ImmutableCallSite& cs, PointsToInfo* pstInfo) {
+  auto callInst = cast<CallInst>(cs.getInstruction());
   if(auto F = cs.getCalledFunction()) {
-    if(F->isIntrinsic()) return;
+    if(F->isIntrinsic() || !F->isDSOLocal()) return;
     cfaPass->callees[cs.getInstruction()].insert(F);
-    // propagateInfo2Parameters()
+    cfaPass->callers[F].insert(callInst->getParent()->getParent());
+    propagateInfo2Parameters(callInst, F, pstInfo);
+  } else {
+    auto callValue = cs.getCalledValue();
+    auto &candidates = pstInfo->pointsTo[callValue];
+    if(candidates.empty())
+      *pstInfo = PointsToInfo::TOP;
+    else for(const Value* v:candidates) {
+      // assert(v->getType()->isFunctionTy());
+      if(!isa<Function>(v)) {
+        llvm::errs() << "call a non-func value!\n";
+        callValue->dump();
+        v->dump();
+      }
+      auto F = cast<Function>(v);
+      cfaPass->callees[cs.getInstruction()].insert(F);
+      propagateInfo2Parameters(callInst, F, pstInfo);
+    }
   }
 }
+
+PointsToSet IntraPointerVisitor::getPstSet(const Value* value, PointsToInfo* pstInfo) {
+  PointsToSet ret;
+  if(value == NULL) return ret;
+  // if(DebugInfo) value->dump();
+  if(isa<Constant>(value) && !allocSites.count(value)) {
+    if(DebugInfo) llvm::errs() << "literal!\n";
+    // nice!
+    if(!isa<ConstantPointerNull>(value)) 
+      ret.insert(value);
+    else {
+      llvm::errs() << "found a NULL pointer!\n";
+    }
+    return ret;
+  }
+  return pstInfo->pointsTo[value];
+}
+
+const Value* IntraPointerVisitor::getOrCreateAllocSite(const Instruction* inst) {
+  if(inst2site.count(inst)) return inst2site[inst];
+
+  static int line = 0; 
+  line++;
+  if(inst->getDebugLoc()) line = inst->getDebugLoc().getLine();
+  Value* site = ConstantInt::get
+        (Type::getInt32Ty(*cfaPass->Ctx), line);
+  // site->setName(inst->getName()); // not work...
+  if(DebugInfo) {
+    llvm::errs() << "alloca site of \"" << inst->getName() << "\" ";
+    site->dump();
+  }
+  allocSites.insert(site);
+  inst2site.emplace(inst, site);
+  return site;
+}
+////
 
 char FuncPtrPass::ID = 0;
 static RegisterPass<FuncPtrPass> X("funcptrpass",
@@ -312,4 +444,30 @@ int main(int argc, char **argv) {
 #ifndef NDEBUG
   // system("pause");
 #endif
+}
+
+static std::string getValueName (const Value *v) {
+  // If we can get name directly
+  if (v->getName().str().length() > 0) {
+      return "%" + v->getName().str();
+  } else if (isa<Instruction>(v)) {
+      std::string s = "";
+      raw_string_ostream *strm = new raw_string_ostream(s);
+      v->print(*strm);
+      std::string inst = strm->str();
+      size_t idx1 = inst.find("%");
+      size_t idx2 = inst.find(" ", idx1);
+      if (idx1 != std::string::npos && idx2 != std::string::npos && idx1 == 2) {
+          return inst.substr(idx1, idx2 - idx1);
+      } else {
+          // nothing match
+          return "";
+      }
+  } else {
+      std::string s = "";
+      raw_string_ostream *strm = new raw_string_ostream(s);
+      v->print(*strm);
+      std::string inst = strm->str();
+      return "\"" + inst + "\"";
+  }
 }

@@ -83,7 +83,40 @@ template <class T>
 void compForwardDataflow(Function *fn, DataflowVisitor<T> *visitor,
                          typename DataflowResult<T>::Type *result,
                          const T &initval) {
-  return;
+  std::set<BasicBlock *> worklist;
+
+  // Initialize the worklist with all blocks
+  // changes may be triggered by callee(return new info) or caller
+  for (Function::iterator bi = fn->begin(); bi != fn->end(); ++bi) {
+    BasicBlock *bb = &*bi;
+    // result->insert(std::make_pair(bb, std::make_pair(initval, initval)));
+    worklist.insert(bb);
+  }
+
+  // Iteratively compute the dataflow result
+  while (!worklist.empty()) {
+    BasicBlock *bb = *worklist.begin();
+    worklist.erase(worklist.begin());
+
+    // Merge all incoming value
+    T bbIn = (*result)[bb].first;
+    for (auto pi = pred_begin(bb), pe = pred_end(bb); pi != pe; pi++) {
+      BasicBlock *pred = *pi;
+      visitor->merge(&bbIn, (*result)[pred].second);
+    }
+
+    (*result)[bb].first = bbIn;
+    visitor->compDFVal(bb, &bbIn, true); // in -> out
+
+    // If outgoing value changed, propagate it along the CFG
+    if (bbIn == (*result)[bb].second)
+      continue;
+    (*result)[bb].second = bbIn;
+
+    for (auto si = succ_begin(bb), se = succ_end(bb); si != se; si++) {
+      worklist.insert(*si);
+    }
+  }
 }
 ///
 /// Compute a backward iterated fixedpoint dataflow function, using a

@@ -272,8 +272,14 @@ void IntraPointerVisitor::compDFVal(Instruction *inst, PointsToInfo *pstInfo) {
     }
     break;
   }
-  case Instruction::GetElementPtr:
-    // break; // handle it like a Load...
+  case Instruction::GetElementPtr: {
+    if(inst->getType()->isPointerTy()) {
+      auto loadFrom = inst->getOperand(0);
+      // strong update
+      pstInfo->pointsTo[inst] = pstInfo->pointsTo[loadFrom];
+      break;
+    }
+  }
   case Instruction::Load:
     if(inst->getType()->isPointerTy()) {
       auto loadFrom = inst->getOperand(0);

@@ -8,3 +8,7 @@
 ## Optimization
 
 a call inst in caller may change the ret node as a result, should we continue caller process or do the callee first?
+
+## Misc
+
+pass `struct` parameter

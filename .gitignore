@@ -1,0 +1,5 @@
+.clang-format
+*.ll
+*.bc
+
+build/

@@ -110,6 +110,9 @@ struct FuncPtrPass;
 struct RetInfo {
   PointsToSet pstSet;
   PointsToInfo argsInfo;
+  bool operator==(const RetInfo& info) {
+    return pstSet==info.pstSet && argsInfo == info.argsInfo;
+  }
 };
 /// Intra-Procedural Visitor
 class IntraPointerVisitor : public DataflowVisitor<PointsToInfo> {
@@ -120,10 +123,11 @@ class IntraPointerVisitor : public DataflowVisitor<PointsToInfo> {
   map<const Value*, ALLOCSITE_TYPE> allocSites;
   map<const Instruction*, const Value*> inst2site;
 
-  void propagateInfo2Parameters(const CallInst *callInst, const Function *F, PointsToInfo* pstInfo);
+  bool propagateInfo2Parameters(const CallInst *callInst, const Function *F, PointsToInfo* pstInfo);
 
   void handleCall(ImmutableCallSite& cs, PointsToInfo* pstInfo);
-  PointsToSet doCall(const CallInst *callInst, const Function *F, PointsToInfo* pstInfo);
+  RetInfo doCall(const CallInst *callInst, const Function *F, PointsToInfo* pstInfo, bool *changed);
+  void strongUpdatePassedObj(PointsToInfo* callerInfo, const PointsToInfo& passedInfo);
 public:
   IntraPointerVisitor(FuncPtrPass* pass): cfaPass(pass){}
   void merge(PointsToInfo *dest, const PointsToInfo &src) override;
@@ -152,29 +156,43 @@ struct FuncPtrPass : public ModulePass {
   IntraPointerVisitor visitor;
   /// context insensitive, we merge all the return information
   /// callsite will get points-to set fro, here
-  map<const Function*, PointsToSet> retPSet;
-  // map<const Function*, >
+  map<const Function*, RetInfo> retPSet;
+  map<const Function*, set<const Value*>> objPassedByArgs;
   map<int, set<const Function*>> callees;
   map<const Function*, set<const Function*> > callers;
   // PointsToInfo heap;
 
   LLVMContext *Ctx;
-  const PointsToSet& getRetInfo(const Function *F) {
+  const RetInfo& getRetInfo(const Function *F) {
     return retPSet[F];
   }
   /// return true if retInfo changes
-  bool addRetInfo(Function *F, const PointsToSet& newInfo) {
+  bool addRetInfo(Function *F, const PointsToSet& newInfo, const PointsToInfo *calleeInfo) {
     if(DebugInfo) llvm::errs() << "newInfo: " << newInfo;
-    if(newInfo.empty()) return false;
-    if(DebugInfo) llvm::errs() << "\norigin: " << retPSet[F];
+    // if(newInfo.empty()) return false;
+    if(DebugInfo) llvm::errs() << "\norigin: " << retPSet[F].pstSet;
     auto retInfo = retPSet[F];
-    mergePtsSet(&retInfo, newInfo);
-    if(DebugInfo) llvm::errs() << "\norigin: " << retPSet[F];
+    mergePtsSet(&retInfo.pstSet, newInfo);
+    addPassedObj2RetInfo(F, &retInfo.argsInfo, calleeInfo);
+    if(DebugInfo) llvm::errs() << "\nnow: " << retInfo.argsInfo <<"\n";
     if(!(retPSet[F] == retInfo)) {
-      retPSet[F] = retInfo;
+      llvm::errs() << "return info changes!\n";
+      retPSet[F] = retInfo; // strong update
       return true;
     }
     return false;
+  }
+
+  // const PointsToSet& getObjSetPassedBy(const Function* F) {}
+
+  void addPassedObj2RetInfo(const Function* F, PointsToInfo* retSiteInfo, const PointsToInfo *calleeInfo) {
+    auto& argsObjSet = objPassedByArgs[F];
+    for(auto o:argsObjSet) {
+      if(!calleeInfo->pointsTo.count(o)) 
+        continue;
+      const PointsToSet& x = calleeInfo->pointsTo.at(o);
+      mergePtsSet(&retSiteInfo->pointsTo[o], x);
+    }
   }
 
   /// if we add more information, will the IN of entry node of function F change?
@@ -287,10 +305,12 @@ void IntraPointerVisitor::compDFVal(Instruction *inst, PointsToInfo *pstInfo) {
   }
   case Instruction::Ret: 
     /// TODO: struct?
-    if(inst->getNumOperands() > 0 && inst->getOperand(0)->getType()->isPointerTy()) {
-      auto src = getPstSet(inst->getOperand(0), pstInfo);
+    {
+      PointsToSet src;
+      if(inst->getNumOperands() > 0 && inst->getOperand(0)->getType()->isPointerTy()) 
+        src = getPstSet(inst->getOperand(0), pstInfo);
       auto curF = inst->getParent()->getParent();
-      bool changed = cfaPass->addRetInfo(curF, src);
+      bool changed = cfaPass->addRetInfo(curF, src, pstInfo);
       if(changed) {
         if(DebugInfo) 
           llvm::errs() << curF->getName() << "'s return set changes\n";
@@ -366,7 +386,8 @@ void IntraPointerVisitor::compDFVal(Instruction *inst, PointsToInfo *pstInfo) {
   }
 }
 
-void IntraPointerVisitor::propagateInfo2Parameters(const CallInst *callInst, const Function *F, PointsToInfo* pstInfo) {
+/// return true if callee input changes?
+bool IntraPointerVisitor::propagateInfo2Parameters(const CallInst *callInst, const Function *F, PointsToInfo* pstInfo) {
   auto entry = const_cast<BasicBlock*>(&*F->begin());
   auto &fMap = cfaPass->gloablMap[F];
   
@@ -382,6 +403,7 @@ void IntraPointerVisitor::propagateInfo2Parameters(const CallInst *callInst, con
       for(auto p:argSet) {
         // propagate one level obj info, it can be a closure
         if(!isAllocObj(p)) continue;
+        cfaPass->objPassedByArgs[F].insert(p);
         mergePtsSet(&entryIn.pointsTo[p], pstInfo->pointsTo[p]);
       }
     }
@@ -396,12 +418,24 @@ void IntraPointerVisitor::propagateInfo2Parameters(const CallInst *callInst, con
     }
     fMap[entry].first = entryIn;
     cfaPass->addFuncToWorklist(F);
+    return true;
+  }
+  return false;
+}
+
+void IntraPointerVisitor::strongUpdatePassedObj(PointsToInfo* callerInfo, const PointsToInfo& passedInfo) {
+  /// only strong update passed objs
+  for(auto& kv:passedInfo.pointsTo) {
+    auto k = kv.first;
+    callerInfo->pointsTo[k] = kv.second;
   }
 }
 
-PointsToSet IntraPointerVisitor::doCall(const CallInst *callInst, const Function *F, PointsToInfo* pstInfo) {
+RetInfo IntraPointerVisitor::doCall(const CallInst *callInst, const Function *F, PointsToInfo* pstInfo, bool *changed) {
   cfaPass->callers[F].insert(callInst->getParent()->getParent());
-  propagateInfo2Parameters(callInst, F, pstInfo);
+  bool calleeInputChanged = propagateInfo2Parameters(callInst, F, pstInfo);
+  assert(changed != NULL);
+  // *changed = calleeInputChanged;
   return cfaPass->getRetInfo(F);
 }
 
@@ -418,8 +452,14 @@ void IntraPointerVisitor::handleCall(ImmutableCallSite& cs, PointsToInfo* pstInf
         pstInfo->pointsTo[callInst].insert(site);
       }
     } else {
-      auto ret = doCall(callInst, F, pstInfo);
-      pstInfo->pointsTo[callInst] = ret; // strong update
+      bool changed = false;
+      auto ret = doCall(callInst, F, pstInfo, &changed);
+      if(!changed) {
+        pstInfo->pointsTo[callInst] = ret.pstSet; // strong update
+        strongUpdatePassedObj(pstInfo, ret.argsInfo);
+      } else {
+        *pstInfo = PointsToInfo::TOP;
+      }
     }
   } else {
     auto callValue = cs.getCalledValue();
@@ -427,7 +467,8 @@ void IntraPointerVisitor::handleCall(ImmutableCallSite& cs, PointsToInfo* pstInf
     if(candidates.empty())
       *pstInfo = PointsToInfo::TOP;
     else {
-      PointsToSet allRet;
+      RetInfo allRet;
+      bool changed = false;
       for(const Value* v:candidates) {
         // assert(v->getType()->isFunctionTy());
         if(!isa<Function>(v)) {
@@ -438,9 +479,17 @@ void IntraPointerVisitor::handleCall(ImmutableCallSite& cs, PointsToInfo* pstInf
         auto F = cast<Function>(v);
         cfaPass->recordCallee(cs.getInstruction(), F);
         // do call
-        mergePtsSet(&allRet, doCall(callInst, F, pstInfo));
+        auto ret = doCall(callInst, F, pstInfo, &changed);
+        if(changed) break;
+        mergePtsSet(&allRet.pstSet, ret.pstSet);
+        merge(&allRet.argsInfo, ret.argsInfo);
       }
-      pstInfo->pointsTo[callInst] = allRet; // strong update
+      if(!changed) {
+        pstInfo->pointsTo[callInst] = allRet.pstSet; // strong update
+        strongUpdatePassedObj(pstInfo, allRet.argsInfo);
+      } else {
+        *pstInfo = PointsToInfo::TOP;
+      }
     }
   }
 }

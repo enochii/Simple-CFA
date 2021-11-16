@@ -139,6 +139,35 @@ public:
   bool isAllocObj(const Value* v);
 };
 
+class UniqueQueue {
+  typedef const Function* T;
+  set<T> st;
+  queue<T> que;
+public:
+  void push(const T& t) {
+    if(st.count(t)) return;
+    st.insert(t);
+    que.push(t);
+  }
+
+  void pop() {
+    assert(!que.empty());
+    auto t = que.front();
+    que.pop();
+    assert(st.count(t));
+    st.erase(t);
+  }
+
+  const T& front() {
+    assert(!que.empty());
+    return que.front();
+  }
+
+  bool empty() {
+    return que.empty();
+  }
+};
+
 ///!TODO TO BE COMPLETED BY YOU FOR ASSIGNMENT 3
 /// we have 2 kinds of worklist:
 /// - global worklist of all functions
@@ -152,7 +181,9 @@ struct FuncPtrPass : public ModulePass {
 
   /// a function will have a local mapping
   map<const Function*, DataflowResult<PointsToInfo>::Type > gloablMap;
-  set<const Function*> worklist;
+  // typedef queue<const Function*> FuncWorklist;
+  typedef UniqueQueue FuncWorklist;
+  FuncWorklist worklist;
   IntraPointerVisitor visitor;
   /// context insensitive, we merge all the return information
   /// callsite will get points-to set fro, here
@@ -215,7 +246,7 @@ struct FuncPtrPass : public ModulePass {
     callees[D.getLine()].insert(F);
   }
   /// add a function to global worklist
-  void addFuncToWorklist(const Function *F) { worklist.insert(F); }
+  void addFuncToWorklist(const Function *F) { worklist.push(F); }
 
   void run(Module &M) {
     Ctx = &M.getContext();
@@ -227,8 +258,12 @@ struct FuncPtrPass : public ModulePass {
     /// 
     
     while(!worklist.empty()) {
-      Function * F = const_cast<Function*>(*worklist.begin());
-      worklist.erase(worklist.begin());
+      /// set DOES NOT provide FIFO, which will break our assumption
+      /// when abort & re-insert caller into worklist
+      // Function * F = const_cast<Function*>(*worklist.begin());
+      // worklist.erase(worklist.begin());
+      Function *F = const_cast<Function*>(worklist.front());
+      worklist.pop();
       if(DebugInfo) {
         llvm::errs() << "pop function: " << F->getName() << "\n";
       }

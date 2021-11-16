@@ -56,4 +56,4 @@ for bc_file in $file_list; do
     fi
 done
 echo "$correct/$total"
-echo "fail: $failed_str"
+echo "fail test cases:: $failed_str"

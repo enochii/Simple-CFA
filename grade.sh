@@ -31,6 +31,7 @@ do_compare() {
     [[ "$actual" == "$expected" ]] && is_match=1 || is_match=0
 }
 
+failed_str=""
 for bc_file in $file_list; do
     if [[ "${bc_file:6:3}" = ".bc" ]]; then
         total=$(( $total + 1 ))
@@ -50,7 +51,9 @@ for bc_file in $file_list; do
             echo "$expected"
             echo "given:"
             echo "$actual"
+            failed_str="$failed_str$file_id "
         fi
     fi
 done
 echo "$correct/$total"
+echo "fail: $failed_str"

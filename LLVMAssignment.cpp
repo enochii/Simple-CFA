@@ -98,6 +98,7 @@ inline raw_ostream &operator<<(raw_ostream &out, const PointsToSet &pst) {
 }
 inline raw_ostream &operator<<(raw_ostream &out, const PointsToInfo &info) {
   for (auto &item:info.pointsTo) {
+    if(item.second.empty()) continue;
     out << getValueName(item.first) << "->";
     out << item.second;
   }
@@ -106,6 +107,10 @@ inline raw_ostream &operator<<(raw_ostream &out, const PointsToInfo &info) {
 /// End of Points to relation
 
 struct FuncPtrPass;
+struct RetInfo {
+  PointsToSet pstSet;
+  PointsToInfo argsInfo;
+};
 /// Intra-Procedural Visitor
 class IntraPointerVisitor : public DataflowVisitor<PointsToInfo> {
   FuncPtrPass *cfaPass = NULL;
@@ -126,6 +131,8 @@ public:
   PointsToSet getPstSet(const Value* value, PointsToInfo* pstInfo);
   const Value* getOrCreateAllocSite(const Instruction* inst, ALLOCSITE_TYPE type);
   bool isHeapObj(const Value* v);
+  bool isStackObj(const Value* v);
+  bool isAllocObj(const Value* v);
 };
 
 ///!TODO TO BE COMPLETED BY YOU FOR ASSIGNMENT 3
@@ -146,9 +153,10 @@ struct FuncPtrPass : public ModulePass {
   /// context insensitive, we merge all the return information
   /// callsite will get points-to set fro, here
   map<const Function*, PointsToSet> retPSet;
+  // map<const Function*, >
   map<int, set<const Function*>> callees;
   map<const Function*, set<const Function*> > callers;
-  PointsToInfo heap;
+  // PointsToInfo heap;
 
   LLVMContext *Ctx;
   const PointsToSet& getRetInfo(const Function *F) {
@@ -278,8 +286,6 @@ void IntraPointerVisitor::compDFVal(Instruction *inst, PointsToInfo *pstInfo) {
     break;
   }
   case Instruction::Ret: 
-    inst->dump();
-    inst->getType()->dump();
     /// TODO: struct?
     if(inst->getNumOperands() > 0 && inst->getOperand(0)->getType()->isPointerTy()) {
       auto src = getPstSet(inst->getOperand(0), pstInfo);
@@ -338,9 +344,11 @@ void IntraPointerVisitor::compDFVal(Instruction *inst, PointsToInfo *pstInfo) {
         // S(x) = S/S(x) ∪ S(y)
         /// TODO: we only have malloc in this case
         if(isHeapObj(singleLoc)) 
-          mergePtsSet(&cfaPass->heap.pointsTo[singleLoc], getPstSet(value, pstInfo));
-        else 
           pstInfo->pointsTo[singleLoc] = getPstSet(value, pstInfo);
+          // mergePtsSet(&pstInfo->pointsTo[singleLoc], getPstSet(value, pstInfo));
+        // else if(isStackObj(singleLoc))
+        //   pstInfo->pointsTo[singleLoc] = getPstSet(value, pstInfo);
+        else  pstInfo->pointsTo[singleLoc] = getPstSet(value, pstInfo);
       } else if(dests.empty()) 
         *pstInfo = PointsToInfo::TOP; // remove all information
       else {
@@ -354,6 +362,7 @@ void IntraPointerVisitor::compDFVal(Instruction *inst, PointsToInfo *pstInfo) {
   }
    if(DumpTrace) {
     llvm::errs() << "after: " << *pstInfo << "\n";
+    // if(!cfaPass->heap.empty())llvm::errs() << "heap: " << cfaPass->heap << "\n";
   }
 }
 
@@ -370,6 +379,11 @@ void IntraPointerVisitor::propagateInfo2Parameters(const CallInst *callInst, con
     if(arg->getType()->isPointerTy()) {
       auto argSet = getPstSet(arg, pstInfo);
       mergePtsSet(&entryIn.pointsTo[par], argSet);
+      for(auto p:argSet) {
+        // propagate one level obj info, it can be a closure
+        if(!isAllocObj(p)) continue;
+        mergePtsSet(&entryIn.pointsTo[p], pstInfo->pointsTo[p]);
+      }
     }
     ++argIt;
     ++parIt;
@@ -435,6 +449,14 @@ bool IntraPointerVisitor::isHeapObj(const Value* v) {
   return allocSites.count(v) && allocSites[v]==HEAP;
 }
 
+bool IntraPointerVisitor::isStackObj(const Value* v) {
+  return allocSites.count(v) && allocSites[v]==STACK;
+}
+
+bool IntraPointerVisitor::isAllocObj(const Value* v) {
+  return allocSites.count(v);
+}
+
 PointsToSet IntraPointerVisitor::getPstSet(const Value* value, PointsToInfo* pstInfo) {
   assert(value != NULL);
   PointsToSet ret;
@@ -448,9 +470,11 @@ PointsToSet IntraPointerVisitor::getPstSet(const Value* value, PointsToInfo* pst
     }
     return ret;
   }
+  // if(isAllocObj(value)) {
   if(isHeapObj(value)) {
     if(DebugInfo) llvm::errs() << "read heap: " << getValueName(value) << "\n";
-    return cfaPass->heap.pointsTo[value];
+    // return cfaPass->heap.pointsTo[value];
+    return pstInfo->pointsTo[value];
   }
   return pstInfo->pointsTo[value];
 }

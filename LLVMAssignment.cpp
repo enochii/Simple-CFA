@@ -90,11 +90,16 @@ struct PointsToInfo {
 };
 const PointsToInfo PointsToInfo::TOP;
 
+inline raw_ostream &operator<<(raw_ostream &out, const PointsToSet &pst) {
+  out << "{";
+  for(auto v:pst) out << getValueName(v) << ", ";
+  out << "} ";
+  return out;
+}
 inline raw_ostream &operator<<(raw_ostream &out, const PointsToInfo &info) {
   for (auto &item:info.pointsTo) {
-    out << getValueName(item.first) << "-> { ";
-    for(auto v:item.second) out << getValueName(v) << ", ";
-    out << "} "; 
+    out << getValueName(item.first) << "->";
+    out << item.second;
   }
   return out;
 }
@@ -104,18 +109,23 @@ struct FuncPtrPass;
 /// Intra-Procedural Visitor
 class IntraPointerVisitor : public DataflowVisitor<PointsToInfo> {
   FuncPtrPass *cfaPass = NULL;
-  set<const Value*> allocSites;
+  enum ALLOCSITE_TYPE{
+    STACK, HEAP
+  };
+  map<const Value*, ALLOCSITE_TYPE> allocSites;
   map<const Instruction*, const Value*> inst2site;
 
   void propagateInfo2Parameters(const CallInst *callInst, const Function *F, PointsToInfo* pstInfo);
 
   void handleCall(ImmutableCallSite& cs, PointsToInfo* pstInfo);
+  PointsToSet doCall(const CallInst *callInst, const Function *F, PointsToInfo* pstInfo);
 public:
   IntraPointerVisitor(FuncPtrPass* pass): cfaPass(pass){}
   void merge(PointsToInfo *dest, const PointsToInfo &src) override;
   void compDFVal(Instruction *inst, PointsToInfo *pstInfo) override;
   PointsToSet getPstSet(const Value* value, PointsToInfo* pstInfo);
-  const Value* getOrCreateAllocSite(const Instruction* inst);
+  const Value* getOrCreateAllocSite(const Instruction* inst, ALLOCSITE_TYPE type);
+  bool isHeapObj(const Value* v);
 };
 
 ///!TODO TO BE COMPLETED BY YOU FOR ASSIGNMENT 3
@@ -135,25 +145,30 @@ struct FuncPtrPass : public ModulePass {
   IntraPointerVisitor visitor;
   /// context insensitive, we merge all the return information
   /// callsite will get points-to set fro, here
-  map<Function*, PointsToSet> retPSet;
-  map<const Instruction*, set<const Function*>> callees;
+  map<const Function*, PointsToSet> retPSet;
+  map<int, set<const Function*>> callees;
   map<const Function*, set<const Function*> > callers;
+  PointsToInfo heap;
 
   LLVMContext *Ctx;
-  const PointsToSet& getRetInfo(Function *F) {
+  const PointsToSet& getRetInfo(const Function *F) {
     return retPSet[F];
   }
   /// return true if retInfo changes
   bool addRetInfo(Function *F, const PointsToSet& newInfo) {
+    if(DebugInfo) llvm::errs() << "newInfo: " << newInfo;
     if(newInfo.empty()) return false;
+    if(DebugInfo) llvm::errs() << "\norigin: " << retPSet[F];
     auto retInfo = retPSet[F];
     mergePtsSet(&retInfo, newInfo);
+    if(DebugInfo) llvm::errs() << "\norigin: " << retPSet[F];
     if(!(retPSet[F] == retInfo)) {
       retPSet[F] = retInfo;
       return true;
     }
     return false;
   }
+
   /// if we add more information, will the IN of entry node of function F change?
   /// if changed, the info will be added into IN[F.entry]
   bool willChange(Function *F, const PointsToInfo &info) {
@@ -168,6 +183,11 @@ struct FuncPtrPass : public ModulePass {
 
   bool willChange(Function *F, ReturnInst* returnSite, const PointsToInfo &info);
 
+  void recordCallee(const Instruction* inst, const Function* F) {
+    auto D = inst->getDebugLoc();
+    assert(D && "no debug line location");
+    callees[D.getLine()].insert(F);
+  }
   /// add a function to global worklist
   void addFuncToWorklist(const Function *F) { worklist.insert(F); }
 
@@ -209,9 +229,9 @@ struct FuncPtrPass : public ModulePass {
 
   void dumpResult() {
     for(auto kv:callees) {
-      auto D = kv.first->getDebugLoc();
-      assert(D);
-      llvm::errs() << D.getLine() << " : ";
+      // auto D = kv.first->getDebugLoc();
+      // assert(D);
+      llvm::errs() << kv.first << " : ";
       string res;
       for(auto &f:kv.second) {
         res += f->getName().str() + ", ";
@@ -240,9 +260,16 @@ void IntraPointerVisitor::compDFVal(Instruction *inst, PointsToInfo *pstInfo) {
   switch (inst->getOpcode())
   {
   case Instruction::Alloca: {
-    auto site = getOrCreateAllocSite(inst);
-    pstInfo->pointsTo[inst].clear();
-    pstInfo->pointsTo[inst].insert(site);
+    auto allocInst = cast<AllocaInst>(inst);
+    if(!allocInst->getAllocatedType()->isIntegerTy()) {
+      // if(DebugInfo) {
+      //   llvm::errs() << "alloc type: ";
+      //   allocInst->getAllocatedType()->dump();
+      // }
+      auto site = getOrCreateAllocSite(inst, ALLOCSITE_TYPE::STACK);
+      pstInfo->pointsTo[inst].clear();
+      pstInfo->pointsTo[inst].insert(site);
+    }
     break;
   } 
   case Instruction::Call: {
@@ -251,12 +278,16 @@ void IntraPointerVisitor::compDFVal(Instruction *inst, PointsToInfo *pstInfo) {
     break;
   }
   case Instruction::Ret: 
-    if(inst->getType()->isPointerTy()) {
+    inst->dump();
+    inst->getType()->dump();
+    /// TODO: struct?
+    if(inst->getNumOperands() > 0 && inst->getOperand(0)->getType()->isPointerTy()) {
       auto src = getPstSet(inst->getOperand(0), pstInfo);
       auto curF = inst->getParent()->getParent();
-      bool changed = cfaPass->
-              addRetInfo(curF, src);
+      bool changed = cfaPass->addRetInfo(curF, src);
       if(changed) {
+        if(DebugInfo) 
+          llvm::errs() << curF->getName() << "'s return set changes\n";
         auto& callers = cfaPass->callers[curF];
         for(auto caller:callers) 
           cfaPass->addFuncToWorklist(caller);
@@ -272,6 +303,7 @@ void IntraPointerVisitor::compDFVal(Instruction *inst, PointsToInfo *pstInfo) {
     }
     break;
   }
+  case Instruction::BitCast:
   case Instruction::GetElementPtr: {
     if(inst->getType()->isPointerTy()) {
       auto loadFrom = inst->getOperand(0);
@@ -304,8 +336,11 @@ void IntraPointerVisitor::compDFVal(Instruction *inst, PointsToInfo *pstInfo) {
       /// TODO: incorrect!
         auto singleLoc = *dests.begin();
         // S(x) = S/S(x) ∪ S(y)
-        // auto pst = getPstSet(value, pstInfo);
-        pstInfo->pointsTo[singleLoc] = getPstSet(value, pstInfo);
+        /// TODO: we only have malloc in this case
+        if(isHeapObj(singleLoc)) 
+          mergePtsSet(&cfaPass->heap.pointsTo[singleLoc], getPstSet(value, pstInfo));
+        else 
+          pstInfo->pointsTo[singleLoc] = getPstSet(value, pstInfo);
       } else if(dests.empty()) 
         *pstInfo = PointsToInfo::TOP; // remove all information
       else {
@@ -350,36 +385,59 @@ void IntraPointerVisitor::propagateInfo2Parameters(const CallInst *callInst, con
   }
 }
 
+PointsToSet IntraPointerVisitor::doCall(const CallInst *callInst, const Function *F, PointsToInfo* pstInfo) {
+  cfaPass->callers[F].insert(callInst->getParent()->getParent());
+  propagateInfo2Parameters(callInst, F, pstInfo);
+  return cfaPass->getRetInfo(F);
+}
+
 void IntraPointerVisitor::handleCall(ImmutableCallSite& cs, PointsToInfo* pstInfo) {
   auto callInst = cast<CallInst>(cs.getInstruction());
   if(auto F = cs.getCalledFunction()) {
     if(F->isIntrinsic() || !F->isDSOLocal()) return;
-    cfaPass->callees[cs.getInstruction()].insert(F);
-    cfaPass->callers[F].insert(callInst->getParent()->getParent());
-    propagateInfo2Parameters(callInst, F, pstInfo);
+    cfaPass->recordCallee(cs.getInstruction(), F);
+    if(F->isDeclaration()) {
+      // malloc
+      if(F->getName().startswith("malloc")) {
+        auto site = getOrCreateAllocSite(callInst, ALLOCSITE_TYPE::HEAP);
+        pstInfo->pointsTo[callInst].clear();
+        pstInfo->pointsTo[callInst].insert(site);
+      }
+    } else {
+      auto ret = doCall(callInst, F, pstInfo);
+      pstInfo->pointsTo[callInst] = ret; // strong update
+    }
   } else {
     auto callValue = cs.getCalledValue();
     auto &candidates = pstInfo->pointsTo[callValue];
     if(candidates.empty())
       *pstInfo = PointsToInfo::TOP;
-    else for(const Value* v:candidates) {
-      // assert(v->getType()->isFunctionTy());
-      if(!isa<Function>(v)) {
-        llvm::errs() << "call a non-func value!\n";
-        callValue->dump();
-        v->dump();
+    else {
+      PointsToSet allRet;
+      for(const Value* v:candidates) {
+        // assert(v->getType()->isFunctionTy());
+        if(!isa<Function>(v)) {
+          llvm::errs() << "call a non-func value!\n";
+          callValue->dump();
+          v->dump();
+        }
+        auto F = cast<Function>(v);
+        cfaPass->recordCallee(cs.getInstruction(), F);
+        // do call
+        mergePtsSet(&allRet, doCall(callInst, F, pstInfo));
       }
-      auto F = cast<Function>(v);
-      cfaPass->callees[cs.getInstruction()].insert(F);
-      propagateInfo2Parameters(callInst, F, pstInfo);
+      pstInfo->pointsTo[callInst] = allRet; // strong update
     }
   }
 }
 
+bool IntraPointerVisitor::isHeapObj(const Value* v) {
+  return allocSites.count(v) && allocSites[v]==HEAP;
+}
+
 PointsToSet IntraPointerVisitor::getPstSet(const Value* value, PointsToInfo* pstInfo) {
+  assert(value != NULL);
   PointsToSet ret;
-  if(value == NULL) return ret;
-  // if(DebugInfo) value->dump();
   if(isa<Constant>(value) && !allocSites.count(value)) {
     if(DebugInfo) llvm::errs() << "literal!\n";
     // nice!
@@ -390,10 +448,14 @@ PointsToSet IntraPointerVisitor::getPstSet(const Value* value, PointsToInfo* pst
     }
     return ret;
   }
+  if(isHeapObj(value)) {
+    if(DebugInfo) llvm::errs() << "read heap: " << getValueName(value) << "\n";
+    return cfaPass->heap.pointsTo[value];
+  }
   return pstInfo->pointsTo[value];
 }
 
-const Value* IntraPointerVisitor::getOrCreateAllocSite(const Instruction* inst) {
+const Value* IntraPointerVisitor::getOrCreateAllocSite(const Instruction* inst, ALLOCSITE_TYPE type) {
   if(inst2site.count(inst)) return inst2site[inst];
 
   static int line = 0; 
@@ -406,7 +468,7 @@ const Value* IntraPointerVisitor::getOrCreateAllocSite(const Instruction* inst) 
     llvm::errs() << "alloca site of \"" << inst->getName() << "\" ";
     site->dump();
   }
-  allocSites.insert(site);
+  allocSites.emplace(site, type);
   inst2site.emplace(inst, site);
   return site;
 }

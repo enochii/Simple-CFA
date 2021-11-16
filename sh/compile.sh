@@ -1,5 +1,6 @@
 mkdir bc
-cd assign3-tests
+TEST_DIR="assign3-tests"
+cd $TEST_DIR
 cfiles=$(ls .)
 for file in $cfiles; do
     prefix=${file:0:6}
@@ -8,5 +9,5 @@ for file in $cfiles; do
     # llvm-dis $bc_file
 done
 cd ..
-mv assign2-tests/*.bc bc
+mv $TEST_DIR/*.bc bc
 # mv assign2-tests/*.ll bc

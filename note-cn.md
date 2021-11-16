@@ -27,9 +27,11 @@ int clever() {
 
 假设我们先分析 f ，到达调用点后，因为对 g 的调用可能会改变 x 指针集，或者是 f 在这个调用点的状态，如果我们继续处理后续语句，会造成不精确。
 
-这个是 `test22.c`，在 `make_simple_alias` 因为参数传递使得 `make_simple_alias` 的 entry node 状态改变，我们会把 `make_simple_alias` 加入 worklist 。对于 `clever`，如果继续走下去会有不精确的数据流（认为 `tf_ptr.p_fptr` 还可能指向 `minus`，然而在这个函数调用后只能指向 `plus`）。所以我们会类似 `*x=y` x 指针集为空时一样处理，即把调用点所有指针集清空，然后中断对 `clever` 的处理。
+这个是 `test22.c`，在 `make_simple_alias` 因为参数传递使得 `make_simple_alias` 的 entry node 状态改变，我们会把 `make_simple_alias` 加入 worklist 。对于 `clever`，如果继续走下去会有不精确的数据流（认为 `tf_ptr.p_fptr` 还可能指向 `minus`，然而在这个函数调用后只能指向 `plus`）。所以我们会类似 `*x=y` x 指针集为空时一样处理，即把调用点所有指针集清空，然后中断对 `clever` 的处理。另一方面，我们希望处理完 `make_simple_alias` 后再来处理 `clever`，所以我们会把 `clever` 也加入 worklist （所以 worklist 应该有两项 `make_simple_alias`（前）和 `clever`（后））。
 
-另一方面，我们希望处理完 `make_simple_alias` 后再来处理 `clever`，所以我们会把 `clever` 也加入 worklist （所以 worklist 应该有两项 `make_simple_alias`（前）和 `clever`（后））。故我们的 worklist 数据结构要**提供 FIFO 的语义**。否则如果下一个 worklist pop 还是拿到 `clever` ，那么还是会出现不精确的问题。一开始我用 set 发现也对了，这是因为函数声明顺序造成了指针的大小差异，而这个又是 set 的排序依据，刚好我们的 `clever` 会后 pop 。所以对于 set 换成 `test/ssch32.c`就会有问题。
+这样做是为了**转移函数的单调性**，事实上如果这不是我们**第一次处理这个调用点**，我们直接拿老的 return 信息就可以。因为这次我们的 IN 有了更多的信息，所以新的 return 信息也会更多。我们之前 abort `clever` 的处理是因为我们没有“前车之鉴”，如果直接拿 IN 作为 OUT 就会违反单调性。
+
+我们的 worklist 数据结构要**提供 FIFO 的语义**。否则如果下一个 worklist pop 还是拿到 `clever` ，那么还是会出现不精确的问题。一开始我用 set 发现也对了，这是因为函数声明顺序造成了指针的大小差异，而这个又是 set 的排序依据，刚好我们的 `clever` 会后 pop 。所以对于 set 换成 `test/ssch32.c`就会有问题。
 
 由于测试样例不足，其实还有一些 case 没处理到，比如有调用链：`F -> G -> H`，先处理 F ，调用 G ，队列变成：
   

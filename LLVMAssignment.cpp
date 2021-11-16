@@ -93,7 +93,7 @@ const PointsToInfo PointsToInfo::TOP;
 inline raw_ostream &operator<<(raw_ostream &out, const PointsToInfo &info) {
   for (auto &item:info.pointsTo) {
     out << getValueName(item.first) << "-> { ";
-    for(auto v:item.second) out << v->getName() << ", ";
+    for(auto v:item.second) out << getValueName(v) << ", ";
     out << "} "; 
   }
   return out;
@@ -211,7 +211,7 @@ struct FuncPtrPass : public ModulePass {
     for(auto kv:callees) {
       auto D = kv.first->getDebugLoc();
       assert(D);
-      llvm::errs() << D.getLine() << ": ";
+      llvm::errs() << D.getLine() << " : ";
       string res;
       for(auto &f:kv.second) {
         res += f->getName().str() + ", ";

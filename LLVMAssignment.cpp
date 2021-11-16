@@ -435,7 +435,7 @@ RetInfo IntraPointerVisitor::doCall(const CallInst *callInst, const Function *F,
   cfaPass->callers[F].insert(callInst->getParent()->getParent());
   bool calleeInputChanged = propagateInfo2Parameters(callInst, F, pstInfo);
   assert(changed != NULL);
-  // *changed = calleeInputChanged;
+  *changed = calleeInputChanged;
   return cfaPass->getRetInfo(F);
 }
 
@@ -459,6 +459,7 @@ void IntraPointerVisitor::handleCall(ImmutableCallSite& cs, PointsToInfo* pstInf
         strongUpdatePassedObj(pstInfo, ret.argsInfo);
       } else {
         *pstInfo = PointsToInfo::TOP;
+        cfaPass->addFuncToWorklist(callInst->getParent()->getParent());
       }
     }
   } else {
@@ -489,6 +490,7 @@ void IntraPointerVisitor::handleCall(ImmutableCallSite& cs, PointsToInfo* pstInf
         strongUpdatePassedObj(pstInfo, allRet.argsInfo);
       } else {
         *pstInfo = PointsToInfo::TOP;
+        cfaPass->addFuncToWorklist(callInst->getParent()->getParent());
       }
     }
   }

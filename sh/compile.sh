@@ -1,5 +1,5 @@
 mkdir bc
-TEST_DIR="assign3-tests"
+TEST_DIR="assign3-test0_29"
 cd $TEST_DIR
 cfiles=$(ls .)
 for file in $cfiles; do

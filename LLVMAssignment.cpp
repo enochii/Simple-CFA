@@ -123,6 +123,8 @@ class IntraPointerVisitor : public DataflowVisitor<PointsToInfo> {
   map<const Value*, ALLOCSITE_TYPE> allocSites;
   map<const Instruction*, const Value*> inst2site;
 
+  void passingObjClosureToCallee(const Value* arg, const Function* F,
+                        PointsToInfo& entryIn, PointsToInfo* pstInfo);
   bool propagateInfo2Parameters(const CallInst *callInst, const Function *F, PointsToInfo* pstInfo);
 
   void handleCall(ImmutableCallSite& cs, PointsToInfo* pstInfo);
@@ -408,7 +410,9 @@ void IntraPointerVisitor::compDFVal(Instruction *inst, PointsToInfo *pstInfo) {
         *pstInfo = PointsToInfo::TOP; // remove all information
       else {
         for(auto p:dests) 
-          mergePtsSet(&pstInfo->pointsTo[p], getPstSet(value, pstInfo));
+          // dube, it's not cool, even wrong: test28.c
+          pstInfo->pointsTo[p] = getPstSet(value, pstInfo);
+          // mergePtsSet(&pstInfo->pointsTo[p], getPstSet(value, pstInfo));
       }
     }
     break;
@@ -418,6 +422,17 @@ void IntraPointerVisitor::compDFVal(Instruction *inst, PointsToInfo *pstInfo) {
    if(DumpTrace) {
     llvm::errs() << "after: " << *pstInfo << "\n";
     // if(!cfaPass->heap.empty())llvm::errs() << "heap: " << cfaPass->heap << "\n";
+  }
+}
+
+void IntraPointerVisitor::passingObjClosureToCallee(const Value* p, const Function* F,
+                        PointsToInfo& entryIn, PointsToInfo* pstInfo) {
+  cfaPass->objPassedByArgs[F].insert(p);
+  mergePtsSet(&entryIn.pointsTo[p], pstInfo->pointsTo[p]);
+  auto pstSet = getPstSet(p, pstInfo);
+  for(auto pp:pstSet) {
+    if(!isAllocObj(pp)) continue;
+    passingObjClosureToCallee(pp, F, entryIn, pstInfo);
   }
 }
 
@@ -438,8 +453,7 @@ bool IntraPointerVisitor::propagateInfo2Parameters(const CallInst *callInst, con
       for(auto p:argSet) {
         // propagate one level obj info, it can be a closure
         if(!isAllocObj(p)) continue;
-        cfaPass->objPassedByArgs[F].insert(p);
-        mergePtsSet(&entryIn.pointsTo[p], pstInfo->pointsTo[p]);
+        passingObjClosureToCallee(p, F, entryIn, pstInfo);
       }
     }
     ++argIt;

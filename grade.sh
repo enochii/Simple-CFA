@@ -6,6 +6,7 @@ make
 cd ..
 
 source sh/compile.sh # generate .bc
+source sh/gen_truth.sh # gen ground-truth
 
 # grading
 ANALYSIS="build/assignment3"
@@ -39,9 +40,9 @@ for bc_file in $file_list; do
         is_match=0
         do_compare ".txt"
 
-        if [[  $file_id = "08" ]] || [[  $file_id = "01" ]]; then
-            do_compare ".txt.1"
-        fi
+        # if [[  $file_id = "08" ]] || [[  $file_id = "01" ]]; then
+        #     do_compare ".txt.1"
+        # fi
         if [[ $is_match == 1 ]]; then
                 echo "$bc_file passed"
                 correct=$(( $correct + 1 ))

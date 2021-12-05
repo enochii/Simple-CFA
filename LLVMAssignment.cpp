@@ -130,6 +130,7 @@ class IntraPointerVisitor : public DataflowVisitor<PointsToInfo> {
   void handleCall(ImmutableCallSite& cs, PointsToInfo* pstInfo);
   RetInfo doCall(const CallInst *callInst, const Function *F, PointsToInfo* pstInfo, bool *changed);
   void strongUpdatePassedObj(PointsToInfo* callerInfo, const PointsToInfo& passedInfo);
+  void handleInvisibleCall(const Function *F, ImmutableCallSite cs, PointsToInfo* pstInfo);
 public:
   IntraPointerVisitor(FuncPtrPass* pass): cfaPass(pass){}
   void merge(PointsToInfo *dest, const PointsToInfo &src) override;
@@ -488,10 +489,34 @@ RetInfo IntraPointerVisitor::doCall(const CallInst *callInst, const Function *F,
   return cfaPass->getRetInfo(F);
 }
 
+void IntraPointerVisitor::handleInvisibleCall(const Function *F, ImmutableCallSite cs, PointsToInfo* pstInfo) {
+  llvm::errs() << "Call " << F->getName() << "\n";
+  if(F->getName().startswith("llvm.memcpy")) {
+    /// call void @llvm.memcpy.p0i8.p0i8.i64(i8* align 8 %1, i8* align 8 %2, i64 8, i1 false)
+    /// *(%1) = *(%2)
+    auto dest = cs.getArgument(0);
+    auto src = cs.getArgument(1);
+    auto &dests = pstInfo->pointsTo[dest];
+    auto &srcs = pstInfo->pointsTo[src];
+    PointsToSet allSrcs;
+    for(auto p:srcs) {
+      auto x = getPstSet(p, pstInfo);
+      mergePtsSet(&allSrcs, x);
+    }
+    for(auto p:dests) {
+      // strong update...
+      pstInfo->pointsTo[p] = allSrcs;
+    }
+  }
+}
+
 void IntraPointerVisitor::handleCall(ImmutableCallSite& cs, PointsToInfo* pstInfo) {
   auto callInst = cast<CallInst>(cs.getInstruction());
   if(auto F = cs.getCalledFunction()) {
-    if(F->isIntrinsic() || !F->isDSOLocal()) return;
+    if(F->isIntrinsic() || !F->isDSOLocal()) {
+      handleInvisibleCall(F, cs, pstInfo);
+      return;
+    }
     cfaPass->recordCallee(cs.getInstruction(), F);
     if(F->isDeclaration()) {
       // malloc

@@ -2,7 +2,7 @@ import os
 import re
 from os import path
 
-TEST_DIR = "./assign3-test0_29"
+TEST_DIR = "./test"
 OUTPUT_DIR = "./ground-truth"
 
 file_list = os.listdir(TEST_DIR)

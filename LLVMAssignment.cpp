@@ -210,7 +210,7 @@ struct FuncPtrPass : public ModulePass {
     addPassedObj2RetInfo(F, &retInfo.argsInfo, calleeInfo);
     if(DebugInfo) llvm::errs() << "\nnow: " << retInfo.argsInfo <<"\n";
     if(!(retPSet[F] == retInfo)) {
-      llvm::errs() << "return info changes!\n";
+      if(DebugInfo) llvm::errs() << "return info changes!\n";
       retPSet[F] = retInfo; // strong update
       return true;
     }
@@ -231,17 +231,17 @@ struct FuncPtrPass : public ModulePass {
 
   /// if we add more information, will the IN of entry node of function F change?
   /// if changed, the info will be added into IN[F.entry]
-  bool willChange(Function *F, const PointsToInfo &info) {
-    auto& mapping = gloablMap[F];
-    BasicBlock* entry = &*F->begin();
-    auto newInfo = mapping[entry].first;
-    visitor.merge(&newInfo, info);
-    if(newInfo == mapping[entry].first) return false;
-    mapping[entry].first = move(newInfo);
-    return true;
-  }
+  // bool willChange(Function *F, const PointsToInfo &info) {
+  //   auto& mapping = gloablMap[F];
+  //   BasicBlock* entry = &*F->begin();
+  //   auto newInfo = mapping[entry].first;
+  //   visitor.merge(&newInfo, info);
+  //   if(newInfo == mapping[entry].first) return false;
+  //   mapping[entry].first = move(newInfo);
+  //   return true;
+  // }
 
-  bool willChange(Function *F, ReturnInst* returnSite, const PointsToInfo &info);
+  // bool willChange(Function *F, ReturnInst* returnSite, const PointsToInfo &info);
 
   void recordCallee(const Instruction* inst, const Function* F) {
     auto D = inst->getDebugLoc();
@@ -490,7 +490,7 @@ RetInfo IntraPointerVisitor::doCall(const CallInst *callInst, const Function *F,
 }
 
 void IntraPointerVisitor::handleInvisibleCall(const Function *F, ImmutableCallSite cs, PointsToInfo* pstInfo) {
-  llvm::errs() << "Call " << F->getName() << "\n";
+  if(DebugInfo) llvm::errs() << "Call invisible" << F->getName() << "\n";
   if(F->getName().startswith("llvm.memcpy")) {
     /// call void @llvm.memcpy.p0i8.p0i8.i64(i8* align 8 %1, i8* align 8 %2, i64 8, i1 false)
     /// *(%1) = *(%2)
@@ -591,7 +591,7 @@ PointsToSet IntraPointerVisitor::getPstSet(const Value* value, PointsToInfo* pst
     if(!isa<ConstantPointerNull>(value)) 
       ret.insert(value);
     else {
-      llvm::errs() << "found a NULL pointer!\n";
+      if(DebugInfo) llvm::errs() << "found a NULL pointer!\n";
     }
     return ret;
   }

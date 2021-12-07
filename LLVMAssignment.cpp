@@ -412,8 +412,8 @@ void IntraPointerVisitor::compDFVal(Instruction *inst, PointsToInfo *pstInfo) {
       else {
         for(auto p:dests) 
           // dube, it's not cool, even wrong: test28.c
-          pstInfo->pointsTo[p] = getPstSet(value, pstInfo);
-          // mergePtsSet(&pstInfo->pointsTo[p], getPstSet(value, pstInfo));
+          // pstInfo->pointsTo[p] = getPstSet(value, pstInfo);
+          mergePtsSet(&pstInfo->pointsTo[p], getPstSet(value, pstInfo)); // weak update
       }
     }
     break;
